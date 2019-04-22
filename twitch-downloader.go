@@ -74,7 +74,7 @@ func main() {
 		os.Exit(1)
 	}
 	for _, it := range vl.Data {
-		fmt.Println(it.Title, it.Duration)
+		fmt.Println(it.Id, it.Title, it.Url, it.Duration)
 	}
 }
 
@@ -93,7 +93,7 @@ func getVideoList(uid string) (*Videos, error) {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Warnw("なんかエラーだって", "error", err)
-		os.Exit(1)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
