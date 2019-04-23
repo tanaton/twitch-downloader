@@ -24,7 +24,7 @@ import (
 const (
 	CLIENT_ID               = "5mb1rkkrde9bnnm6d5q26pyw8rsosc" // 特に秘密にする必要は無さそう
 	HTTP_TIMEOUT            = time.Second * 30
-	COMMAND_TIMEOUT         = time.Second * 180
+	COMMAND_TIMEOUT         = time.Minute * 30
 	DOWNLOAD_PARALLEL       = 4
 	CHUNK_DOWNLOAD_PARALLEL = 4
 )
@@ -92,6 +92,10 @@ func main() {
 	if len(os.Args) >= 3 {
 		base = os.Args[2]
 	}
+	tmpdir := "."
+	if len(os.Args) >= 4 {
+		tmpdir = os.Args[3]
+	}
 
 	uid, err := getUserID(uname)
 	if err != nil {
@@ -111,7 +115,7 @@ func main() {
 			defer func() {
 				<-parallel
 			}()
-			v.download(base)
+			v.download(base, tmpdir)
 		}(it)
 	}
 	for i := 0; i < DOWNLOAD_PARALLEL; i++ {
@@ -190,7 +194,7 @@ func getUserID(uname string) (string, error) {
 	return user.Data[0].Id, nil
 }
 
-func (v *VideoItem) download(base string) {
+func (v *VideoItem) download(base, tmpdir string) {
 	token, err := getToken(v.Id)
 	if err != nil {
 		log.Warnw("トークンの取得に失敗", "error", err)
@@ -216,7 +220,7 @@ func (v *VideoItem) download(base string) {
 	}
 
 	ebase := m3u8Link[0:strings.LastIndex(m3u8Link, "/")] + "/"
-	newpath := filepath.Join(base, "_"+v.Id)
+	newpath := filepath.Join(tmpdir, "_"+v.Id)
 
 	err = os.MkdirAll(newpath, os.ModePerm)
 	if err != nil {
