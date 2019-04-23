@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,7 +24,7 @@ import (
 const (
 	CLIENT_ID               = "5mb1rkkrde9bnnm6d5q26pyw8rsosc" // 特に秘密にする必要は無さそう
 	HTTP_TIMEOUT            = time.Second * 30
-	COMMAND_TIMEOUT         = time.Second * 60
+	COMMAND_TIMEOUT         = time.Second * 180
 	DOWNLOAD_PARALLEL       = 4
 	CHUNK_DOWNLOAD_PARALLEL = 4
 )
@@ -37,6 +38,7 @@ type Users struct {
 
 type VideoItem struct {
 	Id            string `json:"id"`
+	numid         uint64
 	User_id       string `json:"user_id"`
 	User_name     string `json:"user_name"`
 	Title         string `json:"title"`
@@ -73,7 +75,7 @@ var LocalClient = http.Client{
 var regVideo = regexp.MustCompile("VIDEO=\"([^\"]+)\"\n([^\n]+)\n")
 
 func init() {
-	logger, err := zap.NewProduction()
+	logger, err := zap.NewDevelopment()
 	if err != nil {
 		panic(err)
 	}
@@ -85,35 +87,39 @@ func main() {
 		log.Warnw("引数にユーザー名を指定してね", "len", len(os.Args))
 		os.Exit(1)
 	}
-
 	uname := os.Args[1]
+	base := "."
+	if len(os.Args) >= 3 {
+		base = os.Args[2]
+	}
+
 	uid, err := getUserID(uname)
 	if err != nil {
 		log.Warnw("ユーザー名からユーザーIDの取得に失敗", "error", err)
 		os.Exit(1)
 	}
-	vl, err := getVideoList(uid)
+	vl, err := getVideoList(base, uid)
 	if err != nil {
 		log.Warnw("ビデオリストの取得に失敗", "error", err)
 		os.Exit(1)
 	}
 	parallel := make(chan struct{}, DOWNLOAD_PARALLEL)
 	for _, it := range vl.Data {
-		fmt.Println(it.Id, it.Title, it.Url, it.Duration)
 		parallel <- struct{}{}
-		go func(v *VideoItem) {
+		fmt.Println(it.Id, it.Title, it.Url, it.Duration)
+		go func(v VideoItem) { // イテレーションしてる変数の参照を渡すとわけわからん感じになるので値渡しにする
 			defer func() {
 				<-parallel
 			}()
-			v.download()
-		}(&it)
+			v.download(base)
+		}(it)
 	}
 	for i := 0; i < DOWNLOAD_PARALLEL; i++ {
 		parallel <- struct{}{}
 	}
 }
 
-func getVideoList(uid string) (*Videos, error) {
+func getVideoList(base, uid string) (*Videos, error) {
 	u, err := url.Parse("https://api.twitch.tv/helix/videos")
 	if err != nil {
 		log.Fatal(err)
@@ -140,6 +146,19 @@ func getVideoList(uid string) (*Videos, error) {
 	if len(v.Data) == 0 {
 		return nil, errors.New("ビデオが無いっぽい")
 	}
+	vldata := []VideoItem{}
+	for _, it := range v.Data {
+		if isExist(it.getVideoPath(base)) == false {
+			if s, err := strconv.ParseUint(it.Id, 10, 64); err == nil {
+				it.numid = s
+				vldata = append(vldata, it)
+			}
+		}
+	}
+	sort.Slice(vldata, func(i, j int) bool {
+		return vldata[i].numid < vldata[j].numid
+	})
+	v.Data = vldata
 	return &v, nil
 }
 
@@ -171,7 +190,7 @@ func getUserID(uname string) (string, error) {
 	return user.Data[0].Id, nil
 }
 
-func (v *VideoItem) download() {
+func (v *VideoItem) download(base string) {
 	token, err := getToken(v.Id)
 	if err != nil {
 		log.Warnw("トークンの取得に失敗", "error", err)
@@ -197,8 +216,7 @@ func (v *VideoItem) download() {
 	}
 
 	ebase := m3u8Link[0:strings.LastIndex(m3u8Link, "/")] + "/"
-	cc := len(tslist)
-	newpath := filepath.Join(".", "_"+v.Id)
+	newpath := filepath.Join(base, "_"+v.Id)
 
 	err = os.MkdirAll(newpath, os.ModePerm)
 	if err != nil {
@@ -207,61 +225,62 @@ func (v *VideoItem) download() {
 	}
 
 	parallel := make(chan struct{}, CHUNK_DOWNLOAD_PARALLEL)
-	for i := 0; i < cc; i++ {
+	for _, it := range tslist {
 		parallel <- struct{}{}
-		go func(i int) {
+		go func(cn string) {
 			defer func() {
 				<-parallel
 			}()
-			v.downloadChunk(newpath, ebase, i, tslist[i])
-		}(i)
+			v.downloadChunk(newpath, ebase, cn)
+		}(it)
 	}
 	for i := 0; i < CHUNK_DOWNLOAD_PARALLEL; i++ {
 		parallel <- struct{}{}
 	}
 
-	v.ffmpegCombine(newpath, cc)
+	v.ffmpegCombine(base, newpath, tslist)
 	os.RemoveAll(newpath)
 }
 
-func (v *VideoItem) downloadChunk(newpath, ebase string, cc int, cn string) {
+func (v *VideoItem) downloadChunk(newpath, ebase, cn string) {
 	curl := ebase + cn
-	dp := fmt.Sprintf("%s/%s_%d.ts", newpath, v.Id, cc)
+	dp := filepath.Join(newpath, cn)
 	if isExist(dp) {
 		// ファイルが存在する場合
 		return
 	}
 
-	log.Infow("ダウンロード開始", "url", curl)
 	maxRetryCount := 3
 	for retryCount := 0; retryCount < maxRetryCount; retryCount++ {
 		if retryCount > 0 {
 			log.Infow("チャンクダウンロードのリトライ", "count", retryCount, "name", cn)
 		}
 
-		body, err := func() ([]byte, error) {
+		err := func() error {
 			resp, err := LocalClient.Get(curl)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			defer resp.Body.Close()
 
-			body, err := ioutil.ReadAll(resp.Body)
-			if err != nil {
-				return nil, err
-			}
 			if resp.StatusCode != 200 {
-				return nil, errors.New("ステータスコードが変")
+				return errors.New("ステータスコードが変")
 			}
-			return body, nil
+			wfp, err := os.Create(dp)
+			if err != nil {
+				return err
+			}
+			defer wfp.Close()
+			w := bufio.NewWriterSize(wfp, 512*1024)
+			_, rerr := w.ReadFrom(resp.Body)
+			if rerr != nil {
+				return rerr
+			}
+			return w.Flush()
 		}()
 
 		if err == nil {
-			_ = ioutil.WriteFile(dp, body, 0644)
-			log.Infow("ダウンロード完了", "url", curl)
 			break
-		} else {
-			log.Infow("チャンクが無いよ", "error", err)
 		}
 	}
 }
@@ -320,7 +339,7 @@ func getTSList(url string) ([]string, error) {
 	return list, nil
 }
 
-func (v *VideoItem) createConcatFile(newpath string, cn int) (*os.File, error) {
+func (v *VideoItem) createConcatFile(newpath string, tslist []string) (*os.File, error) {
 	tfp, err := ioutil.TempFile(newpath, "twitchVod_"+v.Id+"_")
 	if err != nil {
 		return nil, err
@@ -328,8 +347,8 @@ func (v *VideoItem) createConcatFile(newpath string, cn int) (*os.File, error) {
 	defer tfp.Close()
 
 	concat := ""
-	for i := 0; i < cn; i++ {
-		filePath, _ := filepath.Abs(fmt.Sprintf("%s/%s_%d.ts", newpath, v.Id, i))
+	for _, it := range tslist {
+		filePath, _ := filepath.Abs(filepath.Join(newpath, it))
 		concat += "file '" + filePath + "'\n"
 	}
 
@@ -339,24 +358,37 @@ func (v *VideoItem) createConcatFile(newpath string, cn int) (*os.File, error) {
 	return tfp, nil
 }
 
-func (v *VideoItem) ffmpegCombine(newpath string, cn int) {
+func (v *VideoItem) ffmpegCombine(base, newpath string, tslist []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), COMMAND_TIMEOUT)
 	defer cancel()
 
-	tfp, err := v.createConcatFile(newpath, cn)
+	tfp, err := v.createConcatFile(newpath, tslist)
 	if err != nil {
 		log.Warnw("結合ファイルの生成に失敗", "error", err, "name", tfp.Name())
 		return
 	}
 	defer os.Remove(tfp.Name())
-	args := []string{"-f", "concat", "-safe", "0", "-i", tfp.Name(), "-c", "copy", "-bsf:a", "aac_adtstoasc", "-fflags", "+genpts", v.Id + "_" + v.Title + "_" + v.Duration + ".mp4"}
+
+	args := []string{
+		"-f", "concat",
+		"-safe", "0",
+		"-i", tfp.Name(),
+		"-c", "copy",
+		"-bsf:a", "aac_adtstoasc",
+		"-fflags", "+genpts",
+		v.getVideoPath(base),
+	}
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	var errbuf bytes.Buffer
-	cmd.Stderr = &errbuf
+	var sbuf strings.Builder
+	cmd.Stderr = &sbuf
 	err = cmd.Run()
 	if err != nil {
-		log.Warnw("ffmpegの実行に失敗", "error", err, "log", errbuf.String())
+		log.Warnw("ffmpegの実行に失敗", "error", err, "log", sbuf.String())
 	}
+}
+
+func (v *VideoItem) getVideoPath(base string) string {
+	return filepath.Join(base, v.Id+"_"+v.Title+"_"+v.Duration+".mp4")
 }
 
 func isExist(filename string) bool {
