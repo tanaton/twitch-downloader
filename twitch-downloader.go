@@ -25,8 +25,8 @@ const (
 	CLIENT_ID               = "5mb1rkkrde9bnnm6d5q26pyw8rsosc" // 特に秘密にする必要は無さそう
 	HTTP_TIMEOUT            = time.Second * 30
 	COMMAND_TIMEOUT         = time.Minute * 30
-	DOWNLOAD_PARALLEL       = 4
-	CHUNK_DOWNLOAD_PARALLEL = 4
+	DOWNLOAD_PARALLEL       = 2
+	CHUNK_DOWNLOAD_PARALLEL = 8
 )
 
 type UserItem struct {
