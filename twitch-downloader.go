@@ -135,7 +135,7 @@ func getVideoList(base, uid string) (*Videos, error) {
 
 	req, err := http.NewRequest("GET", u.String(), nil)
 	req.Header.Add("Client-ID", CLIENT_ID)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := LocalClient.Do(req)
 	if err != nil {
 		log.Warnw("なんかエラーだって", "error", err)
 		return nil, err
@@ -177,7 +177,7 @@ func getUserID(uname string) (string, error) {
 
 	req, err := http.NewRequest("GET", u.String(), nil)
 	req.Header.Add("Client-ID", CLIENT_ID)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := LocalClient.Do(req)
 	if err != nil {
 		return "", err
 	}
