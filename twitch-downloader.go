@@ -117,7 +117,7 @@ func main() {
 			}()
 			err := v.download(base, tmpdir)
 			if err != nil {
-				log.Warn("ダウンロード処理に失敗", "error", err)
+				log.Warnw("ダウンロード処理に失敗", "error", err, "base", base, "tmpdir", tmpdir)
 			}
 		}(it)
 	}
@@ -233,7 +233,14 @@ func (v *VideoItem) download(base, tmpdir string) error {
 			defer func() {
 				<-parallel
 			}()
-			v.downloadChunk(newpath, ebase, cn)
+			err := v.downloadChunk(newpath, ebase, cn)
+			if err != nil {
+				log.Warnw("チャンクのダウンロードに失敗",
+					"error", err,
+					"path", newpath,
+					"ebase", ebase,
+					"chunk_name", cn)
+			}
 		}(it)
 	}
 	for i := 0; i < CHUNK_DOWNLOAD_PARALLEL; i++ {
