@@ -115,7 +115,10 @@ func main() {
 			defer func() {
 				<-parallel
 			}()
-			v.download(base, tmpdir)
+			err := v.download(base, tmpdir)
+			if err != nil {
+				log.Warn("ダウンロード処理に失敗", "error", err)
+			}
 		}(it)
 	}
 	for i := 0; i < DOWNLOAD_PARALLEL; i++ {
@@ -126,7 +129,7 @@ func main() {
 func getVideoList(base, uid string) (*Videos, error) {
 	u, err := url.Parse("https://api.twitch.tv/helix/videos")
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 	q := u.Query()
 	q.Set("user_id", uid)
@@ -137,7 +140,6 @@ func getVideoList(base, uid string) (*Videos, error) {
 	req.Header.Add("Client-ID", CLIENT_ID)
 	resp, err := LocalClient.Do(req)
 	if err != nil {
-		log.Warnw("なんかエラーだって", "error", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -169,7 +171,7 @@ func getVideoList(base, uid string) (*Videos, error) {
 func getUserID(uname string) (string, error) {
 	u, err := url.Parse("https://api.twitch.tv/helix/users")
 	if err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 	q := u.Query()
 	q.Set("login", uname)
@@ -194,29 +196,25 @@ func getUserID(uname string) (string, error) {
 	return user.Data[0].Id, nil
 }
 
-func (v *VideoItem) download(base, tmpdir string) {
+func (v *VideoItem) download(base, tmpdir string) error {
 	token, err := getToken(v.Id)
 	if err != nil {
-		log.Warnw("トークンの取得に失敗", "error", err)
-		return
+		return err
 	}
 
 	emap, err := token.getEdgecastURL()
 	if err != nil {
-		log.Warnw("APIアクセスに失敗", "error", err)
-		return
+		return err
 	}
 
 	m3u8Link, ok := emap["chunked"]
 	if !ok {
-		log.Warnw("チャンクが無い！", "url", m3u8Link)
-		return
+		return errors.New("チャンクが無い")
 	}
 
 	tslist, err := getTSList(m3u8Link)
 	if err != nil {
-		log.Warnw("ダウンロードリスト取得失敗", "error", err)
-		return
+		return err
 	}
 
 	ebase := m3u8Link[0:strings.LastIndex(m3u8Link, "/")] + "/"
@@ -224,9 +222,9 @@ func (v *VideoItem) download(base, tmpdir string) {
 
 	err = os.MkdirAll(newpath, os.ModePerm)
 	if err != nil {
-		log.Warnw("フォルダ作成失敗", "error", err)
-		return
+		return err
 	}
+	defer os.RemoveAll(newpath)
 
 	parallel := make(chan struct{}, CHUNK_DOWNLOAD_PARALLEL)
 	for _, it := range tslist {
@@ -242,20 +240,18 @@ func (v *VideoItem) download(base, tmpdir string) {
 		parallel <- struct{}{}
 	}
 
-	v.ffmpegCombine(base, newpath, tslist)
-	os.RemoveAll(newpath)
+	return v.ffmpegCombine(base, newpath, tslist)
 }
 
-func (v *VideoItem) downloadChunk(newpath, ebase, cn string) {
+func (v *VideoItem) downloadChunk(newpath, ebase, cn string) error {
 	curl := ebase + cn
 	dp := filepath.Join(newpath, cn)
 	if isExist(dp) {
 		// ファイルが存在する場合
-		return
+		return errors.New("チャンクファイルはダウンロード済み：" + dp)
 	}
 
-	maxRetryCount := 3
-	for retryCount := 0; retryCount < maxRetryCount; retryCount++ {
+	for retryCount := 3; retryCount > 0; retryCount-- {
 		if retryCount > 0 {
 			log.Infow("チャンクダウンロードのリトライ", "count", retryCount, "name", cn)
 		}
@@ -285,12 +281,15 @@ func (v *VideoItem) downloadChunk(newpath, ebase, cn string) {
 
 		if err == nil {
 			break
+		} else if retryCount <= 1 {
+			return err
 		}
 	}
+	return nil
 }
 
 func getToken(vid string) (*Token, error) {
-	resp, err := http.Get("https://api.twitch.tv/api/vods/" + vid + "/access_token?&client_id=" + CLIENT_ID)
+	resp, err := LocalClient.Get("https://api.twitch.tv/api/vods/" + vid + "/access_token?&client_id=" + CLIENT_ID)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +302,7 @@ func getToken(vid string) (*Token, error) {
 }
 
 func (t *Token) getEdgecastURL() (map[string]string, error) {
-	resp, err := http.Get("http://usher.twitch.tv/vod/" + t.vid + "?nauthsig=" + t.Sig + "&nauth=" + t.Token + "&allow_source=true")
+	resp, err := LocalClient.Get("http://usher.twitch.tv/vod/" + t.vid + "?nauthsig=" + t.Sig + "&nauth=" + t.Token + "&allow_source=true")
 	if err != nil {
 		return nil, err
 	}
@@ -322,11 +321,11 @@ func (t *Token) getEdgecastURL() (map[string]string, error) {
 		emap[ele[1]] = ele[2]
 	}
 
-	return emap, err
+	return emap, nil
 }
 
 func getTSList(url string) ([]string, error) {
-	resp, err := http.Get(url)
+	resp, err := LocalClient.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -343,40 +342,43 @@ func getTSList(url string) ([]string, error) {
 	return list, nil
 }
 
-func (v *VideoItem) createConcatFile(newpath string, tslist []string) (*os.File, error) {
+func (v *VideoItem) createConcatFile(newpath string, tslist []string) (string, error) {
 	tfp, err := ioutil.TempFile(newpath, "twitchVod_"+v.Id+"_")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer tfp.Close()
 
-	concat := ""
+	w := bufio.NewWriter(tfp)
 	for _, it := range tslist {
 		filePath, _ := filepath.Abs(filepath.Join(newpath, it))
-		concat += "file '" + filePath + "'\n"
+		_, err := w.WriteString("file '" + filePath + "'\n")
+		if err != nil {
+			return "", err
+		}
+	}
+	err = w.Flush()
+	if err != nil {
+		return "", err
 	}
 
-	if _, err := tfp.WriteString(concat); err != nil {
-		return nil, err
-	}
-	return tfp, nil
+	return tfp.Name(), nil
 }
 
-func (v *VideoItem) ffmpegCombine(base, newpath string, tslist []string) {
+func (v *VideoItem) ffmpegCombine(base, newpath string, tslist []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), COMMAND_TIMEOUT)
 	defer cancel()
 
-	tfp, err := v.createConcatFile(newpath, tslist)
+	cpath, err := v.createConcatFile(newpath, tslist)
 	if err != nil {
-		log.Warnw("結合ファイルの生成に失敗", "error", err, "name", tfp.Name())
-		return
+		return err
 	}
-	defer os.Remove(tfp.Name())
+	defer os.Remove(cpath)
 
 	args := []string{
 		"-f", "concat",
 		"-safe", "0",
-		"-i", tfp.Name(),
+		"-i", cpath,
 		"-c", "copy",
 		"-bsf:a", "aac_adtstoasc",
 		"-fflags", "+genpts",
@@ -387,8 +389,9 @@ func (v *VideoItem) ffmpegCombine(base, newpath string, tslist []string) {
 	cmd.Stderr = &sbuf
 	err = cmd.Run()
 	if err != nil {
-		log.Warnw("ffmpegの実行に失敗", "error", err, "log", sbuf.String())
+		return err
 	}
+	return nil
 }
 
 func (v *VideoItem) getVideoPath(base string) string {
