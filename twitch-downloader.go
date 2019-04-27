@@ -258,12 +258,10 @@ func (v *VideoItem) downloadChunk(newpath, ebase, cn string) error {
 		return errors.New("チャンクファイルはダウンロード済み：" + dp)
 	}
 
-	for retryCount := 3; retryCount > 0; retryCount-- {
-		if retryCount > 0 {
-			log.Infow("チャンクダウンロードのリトライ", "count", retryCount, "name", cn)
-		}
-
-		err := func() error {
+	var err error
+	for rc := 3; rc > 0; rc-- {
+		log.Infow("チャンクダウンロード開始", "url", curl, "name", cn)
+		err = func() error {
 			resp, err := LocalClient.Get(curl)
 			if err != nil {
 				return err
@@ -288,11 +286,11 @@ func (v *VideoItem) downloadChunk(newpath, ebase, cn string) error {
 
 		if err == nil {
 			break
-		} else if retryCount <= 1 {
-			return err
+		} else {
+			log.Infow("チャンクダウンロードのリトライ", "remaining_count", rc-1, "name", cn)
 		}
 	}
-	return nil
+	return err
 }
 
 func getToken(vid string) (*Token, error) {
